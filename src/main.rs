@@ -1,6 +1,6 @@
-use std::env;
 use std::io;
 
+use clap::crate_authors;
 use regex::Regex;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
@@ -18,19 +18,59 @@ struct CompileCommand {
 #[tokio::main(worker_threads = 6)]
 async fn main() -> io::Result<()> {
     // 从命令行参数获取命令和参数
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("用法: {} <命令> [参数...]", args[0]);
-        return Ok(());
-    }
+    let matches = clap::Command::new("bear_rs")
+        .version("1.0")
+        .author(crate_authors!(" , "))
+        .about("A tool to generate compile_commands.json")
+        .help_template(
+            "{bin} {version} present by {author-with-newline}\
+            {about}\n\n\
+            {usage-heading} {usage}\n\n\
+            {all-args}\n",
+        )
+        .override_usage("Usage: bear_rs [OPTIONS] -- [COMMAND] [ARGS]...\n\nUse `--` to separate bear_rs options from the command to be run.")
+        .arg(
+            clap::Arg::new("output_dir")
+            .short('o')
+            .long("output-dir")
+            .value_name("DIR")
+            .help("Sets the output directory")
+            .num_args(1),
+        )
+        .arg(
+            clap::Arg::new("command")
+            .help("The command to run")
+            .required(true)
+            .trailing_var_arg(true)
+            .num_args(1..)
+            .allow_hyphen_values(true),
+        )
+        .get_matches();
+
+    let output_dir = matches
+        .get_one::<String>("output_dir")
+        .map(|s| s.as_str())
+        .unwrap_or(".");
+    let output_path = format!("{}/compile_commands.json", output_dir);
+
+    // 获取外部命令和参数
+    let command_and_args: Vec<&str> = matches
+        .get_many::<String>("command")
+        .unwrap()
+        .map(|s| s.as_str())
+        .collect::<Vec<&str>>();
+
+    println!("命令行参数: {:?}", command_and_args);
+    let command = command_and_args[0];
+    let args: Vec<&str> = command_and_args[1..].to_vec();
 
     // 创建输出文件
-    let mut file = File::create("compile_commands.json").await?;
+    let mut file = File::create(output_path).await?;
     let _ = file.write_all(b"[\n").await?;
 
     // 运行指定的命令并获取输出
-    let process = Command::new(&args[1])
-        .args(&args[2..]) // 将命令行参数传递给命令
+    let process = Command::new(command)
+        .args(&args) // 将命令行参数传递给命令
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
@@ -62,13 +102,13 @@ async fn main() -> io::Result<()> {
 async fn process_line(line: &str, compiler_regex: &Regex, file: &mut File, first_entry: &mut bool) {
     if is_compile_command(line, compiler_regex) {
         println!("匹配的条件: {:?}", line);
-        let parts: Vec<&str> = line.split_whitespace().collect();
-
-        // 找到输出文件的位置
-        let output_file_index = parts.iter().position(|&s| s == "-o").map(|i| i + 1);
-
-        // 找到源文件的位置（假设源文件在命令的最后）
-        let source_file = parts.last().unwrap_or(&"").to_string();
+        // 使用正则表达式匹配源文件
+        let source_file_regex = Regex::new(r"(\S+\.(c|cpp|cc|cxx))\s?").unwrap();
+        let source_file = source_file_regex
+            .captures(line)
+            .and_then(|caps| caps.get(1))
+            .map_or("", |m| m.as_str())
+            .to_string();
 
         let command = line;
         let directory = std::env::current_dir()
@@ -81,7 +121,7 @@ async fn process_line(line: &str, compiler_regex: &Regex, file: &mut File, first
             command: command.to_string(),
             file: source_file, // 使用源文件作为file字段
         };
-        let json = serde_json::to_string(&compile_command).unwrap();
+        let json = serde_json::to_string_pretty(&compile_command).unwrap();
 
         // 打印符合条件的编译命令
         println!("{}", command);
